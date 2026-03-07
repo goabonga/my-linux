@@ -105,7 +105,7 @@ extract_and_cd() {
     tar -xf "$tarball"
 
     if [ -z "$dir_name" ]; then
-        dir_name=$(tar -tf "$tarball" | head -1 | cut -d'/' -f1)
+        dir_name=$(tar -tf "$tarball" 2>/dev/null | head -1 | cut -d'/' -f1) || true
     fi
 
     cd "$dir_name"

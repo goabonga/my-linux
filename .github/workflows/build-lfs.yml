@@ -36,30 +36,45 @@ jobs:
           sudo mkdir -pv $LFS/sources
           sudo chmod -v a+wt $LFS/sources
 
-      - name: Download source packages
+      - name: Download sources via LFS mirror
         run: |
-          # Force IPv4 to avoid IPv6 timeouts on GitHub runners
-          sudo wget --input-file=sources/wget-list \
-               --continue \
-               --directory-prefix=$LFS/sources \
-               --no-verbose \
-               --inet4-only \
-               --tries=3 \
-               --timeout=60 \
-               --waitretry=3 \
-               --content-disposition || true
-          echo "First pass: $(ls $LFS/sources | wc -l) files"
-          # Second pass for any failures
-          sudo wget --input-file=sources/wget-list \
-               --continue \
-               --directory-prefix=$LFS/sources \
-               --no-verbose \
-               --inet4-only \
-               --tries=3 \
-               --timeout=90 \
-               --waitretry=5 \
-               --content-disposition || true
-          echo "Second pass: $(ls $LFS/sources | wc -l) files"
+          LFS_MIRROR="https://ftp.osuosl.org/pub/lfs/lfs-packages/lfs-packages-12.2.tar"
+          echo "Downloading all LFS 12.2 packages from OSUOSL mirror..."
+          wget --inet4-only --tries=3 --timeout=120 \
+               -O /tmp/lfs-packages.tar "$LFS_MIRROR" || \
+          wget --inet4-only --tries=3 --timeout=120 \
+               -O /tmp/lfs-packages.tar \
+               "https://mirror.download.it/lfs/lfs-packages/lfs-packages-12.2.tar" || true
+
+          if [ -f /tmp/lfs-packages.tar ] && [ -s /tmp/lfs-packages.tar ]; then
+            echo "Extracting packages..."
+            tar -xf /tmp/lfs-packages.tar -C $LFS/sources --strip-components=1
+            rm -f /tmp/lfs-packages.tar
+            echo "Extracted $(ls $LFS/sources | wc -l) files"
+          else
+            echo "Mirror download failed, falling back to individual URLs..."
+            sudo wget --input-file=sources/wget-list \
+                 --continue \
+                 --directory-prefix=$LFS/sources \
+                 --no-verbose \
+                 --inet4-only \
+                 --tries=3 \
+                 --timeout=30 \
+                 --waitretry=3 || true
+          fi
+
+      - name: Download missing packages from individual URLs
+        run: |
+          # Fill any gaps from wget-list
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            filename=$(basename "$url" | sed 's|/download$||')
+            if [ ! -f "$LFS/sources/$filename" ]; then
+              echo "Downloading missing: $filename"
+              sudo wget --inet4-only --tries=2 --timeout=30 \
+                   -O "$LFS/sources/$filename" "$url" 2>/dev/null || true
+            fi
+          done < sources/wget-list
 
       - name: Download patches
         run: |
@@ -69,34 +84,11 @@ jobs:
                --no-verbose \
                --inet4-only \
                --tries=3 \
-               --timeout=60 || true
-
-      - name: Fix sourceforge content-disposition filenames
-        run: |
-          # SourceForge /download URLs save as "download", rename them
-          cd $LFS/sources
-          for f in download download.*; do
-            [ -f "$f" ] || continue
-            echo "Removing bogus file: $f"
-            sudo rm -f "$f"
-          done
-          # Re-download sourceforge files with correct names if missing
-          for pkg in expect5.45.4.tar.gz procps-ng-4.0.4.tar.xz psmisc-23.7.tar.xz; do
-            if [ ! -f "$LFS/sources/$pkg" ]; then
-              echo "Re-downloading $pkg..."
-              case $pkg in
-                expect*) sudo wget -O "$LFS/sources/$pkg" "https://sourceforge.net/projects/expect/files/Expect/5.45.4/expect5.45.4.tar.gz/download" --timeout=120 || true ;;
-                procps*) sudo wget -O "$LFS/sources/$pkg" "https://sourceforge.net/projects/procps-ng/files/Production/procps-ng-4.0.4.tar.xz/download" --timeout=120 || true ;;
-                psmisc*) sudo wget -O "$LFS/sources/$pkg" "https://sourceforge.net/projects/psmisc/files/psmisc/psmisc-23.7.tar.xz/download" --timeout=120 || true ;;
-              esac
-            fi
-          done
+               --timeout=30 || true
 
       - name: Verify critical downloads
         run: |
-          echo "=== Downloaded files ==="
-          ls $LFS/sources/ | wc -l
-          echo ""
+          echo "=== Total files: $(ls $LFS/sources | wc -l) ==="
           CRITICAL="binutils-2.43.1.tar.xz gcc-14.2.0.tar.xz glibc-2.40.tar.xz
                     linux-6.10.5.tar.xz gmp-6.3.0.tar.xz mpfr-4.2.1.tar.xz
                     mpc-1.3.1.tar.gz ncurses-6.5.tar.gz bash-5.2.32.tar.gz

@@ -27,7 +27,7 @@ jobs:
     name: "Stage 1: Download Sources"
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.start_stage <= '1' }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -38,25 +38,28 @@ jobs:
 
       - name: Download source packages
         run: |
-          # First pass
+          # Force IPv4 to avoid IPv6 timeouts on GitHub runners
           sudo wget --input-file=sources/wget-list \
                --continue \
                --directory-prefix=$LFS/sources \
                --no-verbose \
+               --inet4-only \
                --tries=3 \
                --timeout=60 \
-               --waitretry=5 \
+               --waitretry=3 \
                --content-disposition || true
+          echo "First pass: $(ls $LFS/sources | wc -l) files"
           # Second pass for any failures
           sudo wget --input-file=sources/wget-list \
                --continue \
                --directory-prefix=$LFS/sources \
                --no-verbose \
-               --tries=5 \
-               --timeout=120 \
-               --waitretry=10 \
+               --inet4-only \
+               --tries=3 \
+               --timeout=90 \
+               --waitretry=5 \
                --content-disposition || true
-          echo "Downloaded $(ls $LFS/sources | wc -l) files"
+          echo "Second pass: $(ls $LFS/sources | wc -l) files"
 
       - name: Download patches
         run: |
@@ -64,7 +67,8 @@ jobs:
                --continue \
                --directory-prefix=$LFS/sources \
                --no-verbose \
-               --tries=5 \
+               --inet4-only \
+               --tries=3 \
                --timeout=60 || true
 
       - name: Fix sourceforge content-disposition filenames

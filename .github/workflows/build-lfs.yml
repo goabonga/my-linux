@@ -188,18 +188,14 @@ jobs:
                --continue --directory-prefix=$LFS/sources \
                --no-verbose --tries=5 --timeout=30 || true
 
-      - name: Add LFS tools to PATH
-        run: |
-          echo "$LFS/tools/bin" >> $GITHUB_PATH
-
       - name: Build cross-toolchain (Chapter 5)
         run: |
           chmod +x scripts/*.sh
-          sudo -E bash scripts/02-build-cross-toolchain.sh
+          sudo -E env PATH="$LFS/tools/bin:$PATH" bash scripts/02-build-cross-toolchain.sh
 
       - name: Build temporary tools (Chapter 6)
         run: |
-          sudo -E bash scripts/03-build-temp-tools.sh
+          sudo -E env PATH="$LFS/tools/bin:$PATH" bash scripts/03-build-temp-tools.sh
 
       - name: Archive toolchain build
         run: |

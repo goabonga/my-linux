@@ -1,0 +1,446 @@
+name: Build Linux From Scratch 12.2
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_stage:
+        description: 'Start from stage (1-5)'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+
+env:
+  LFS: /mnt/lfs
+  LFS_TGT: x86_64-lfs-linux-gnu
+
+jobs:
+  # ===========================================================
+  # Stage 1: Download all source packages
+  # ===========================================================
+  download-sources:
+    name: "Stage 1: Download Sources"
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.start_stage <= '1' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare LFS directory
+        run: |
+          sudo mkdir -pv $LFS/sources
+          sudo chmod -v a+wt $LFS/sources
+
+      - name: Download source packages
+        run: |
+          sudo wget --input-file=sources/wget-list \
+               --continue \
+               --directory-prefix=$LFS/sources \
+               --no-verbose \
+               --tries=5 \
+               --timeout=30 || true
+          echo "Downloaded $(ls $LFS/sources | wc -l) files"
+
+      - name: Download patches
+        run: |
+          sudo wget --input-file=sources/patches-list \
+               --continue \
+               --directory-prefix=$LFS/sources \
+               --no-verbose \
+               --tries=5 \
+               --timeout=30 || true
+
+      - name: Verify downloads
+        run: |
+          echo "=== Downloaded files ==="
+          ls -la $LFS/sources/ | head -20
+          echo "..."
+          echo "Total: $(ls $LFS/sources | wc -l) files"
+
+      - name: Archive sources
+        run: |
+          cd $LFS
+          sudo tar -cf /tmp/lfs-sources.tar sources/
+
+      - name: Upload sources artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfs-sources
+          path: /tmp/lfs-sources.tar
+          retention-days: 7
+          compression-level: 0
+
+  # ===========================================================
+  # Stage 2: Build cross-toolchain + temporary tools (Ch. 5-6)
+  # ===========================================================
+  build-toolchain:
+    name: "Stage 2: Cross-Toolchain & Temp Tools"
+    runs-on: ubuntu-latest
+    needs: [download-sources]
+    if: always() && (needs.download-sources.result == 'success' || github.event.inputs.start_stage == '2')
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+               /opt/ghc /opt/hostedtoolcache/CodeQL \
+               /usr/local/share/boost /usr/share/swift \
+               /usr/local/.ghcup 2>/dev/null || true
+          sudo apt-get clean
+          echo "=== After cleanup ==="
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bison gawk texinfo \
+               file rsync
+
+      - name: Prepare LFS directory structure
+        run: |
+          sudo mkdir -pv $LFS/{etc,var,tools}
+          sudo mkdir -pv $LFS/usr/{bin,lib,sbin}
+          for i in bin lib sbin; do
+            sudo ln -sv usr/$i $LFS/$i || true
+          done
+          case $(uname -m) in
+            x86_64) sudo mkdir -pv $LFS/lib64 ;;
+          esac
+
+      - name: Download sources artifact
+        if: ${{ github.event.inputs.start_stage != '2' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: lfs-sources
+          path: /tmp
+
+      - name: Restore sources from artifact
+        if: ${{ github.event.inputs.start_stage != '2' }}
+        run: |
+          cd $LFS
+          sudo tar -xf /tmp/lfs-sources.tar
+
+      - name: Download sources directly (if starting from stage 2)
+        if: ${{ github.event.inputs.start_stage == '2' }}
+        run: |
+          sudo mkdir -pv $LFS/sources
+          sudo chmod a+wt $LFS/sources
+          sudo wget --input-file=sources/wget-list \
+               --continue --directory-prefix=$LFS/sources \
+               --no-verbose --tries=5 --timeout=30 || true
+          sudo wget --input-file=sources/patches-list \
+               --continue --directory-prefix=$LFS/sources \
+               --no-verbose --tries=5 --timeout=30 || true
+
+      - name: Add LFS tools to PATH
+        run: |
+          echo "$LFS/tools/bin" >> $GITHUB_PATH
+
+      - name: Build cross-toolchain (Chapter 5)
+        run: |
+          chmod +x scripts/*.sh
+          sudo -E bash scripts/02-build-cross-toolchain.sh
+
+      - name: Build temporary tools (Chapter 6)
+        run: |
+          sudo -E bash scripts/03-build-temp-tools.sh
+
+      - name: Archive toolchain build
+        run: |
+          cd $LFS
+          echo "=== LFS directory size ==="
+          sudo du -sh .
+          sudo tar -cf /tmp/lfs-toolchain.tar \
+               --exclude='sources' .
+
+      - name: Upload toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfs-toolchain
+          path: /tmp/lfs-toolchain.tar
+          retention-days: 7
+          compression-level: 0
+
+  # ===========================================================
+  # Stage 3: Chroot setup + System build part 1 (Ch. 7-8 first half)
+  # ===========================================================
+  build-system-part1:
+    name: "Stage 3: System Build Part 1"
+    runs-on: ubuntu-latest
+    needs: [build-toolchain]
+    if: always() && (needs.build-toolchain.result == 'success' || github.event.inputs.start_stage == '3')
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+               /opt/ghc /opt/hostedtoolcache/CodeQL \
+               /usr/local/share/boost /usr/share/swift \
+               /usr/local/.ghcup 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential rsync
+
+      - name: Download toolchain artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lfs-toolchain
+          path: /tmp
+
+      - name: Restore toolchain
+        run: |
+          sudo mkdir -pv $LFS
+          cd $LFS
+          sudo tar -xf /tmp/lfs-toolchain.tar
+          rm -f /tmp/lfs-toolchain.tar
+          # Restore sources if needed
+          if [ ! -d "$LFS/sources" ]; then
+            echo "Re-downloading sources..."
+            sudo mkdir -pv $LFS/sources
+            sudo wget --input-file=$GITHUB_WORKSPACE/sources/wget-list \
+                 --continue --directory-prefix=$LFS/sources \
+                 --no-verbose --tries=5 --timeout=30 || true
+            sudo wget --input-file=$GITHUB_WORKSPACE/sources/patches-list \
+                 --continue --directory-prefix=$LFS/sources \
+                 --no-verbose --tries=5 --timeout=30 || true
+          fi
+
+      - name: Chroot setup + temp tools (Chapter 7)
+        run: |
+          chmod +x scripts/*.sh
+          sudo -E bash scripts/04-chroot-setup.sh
+
+      - name: Build system part 1 (Chapter 8 first half)
+        run: |
+          # Copy build script into chroot
+          sudo cp scripts/05-build-system.sh $LFS/tmp/
+          sudo chmod +x $LFS/tmp/05-build-system.sh
+
+          # Mount virtual filesystems (may already be mounted)
+          sudo mount -v --bind /dev $LFS/dev 2>/dev/null || true
+          sudo mount -vt devpts devpts -o gid=5,mode=0620 $LFS/dev/pts 2>/dev/null || true
+          sudo mount -vt proc proc $LFS/proc 2>/dev/null || true
+          sudo mount -vt sysfs sysfs $LFS/sys 2>/dev/null || true
+          sudo mount -vt tmpfs tmpfs $LFS/run 2>/dev/null || true
+
+          # Run build in chroot
+          sudo chroot $LFS /usr/bin/env -i \
+              HOME=/root TERM=$TERM \
+              PATH=/usr/bin:/usr/sbin \
+              MAKEFLAGS="-j$(nproc)" \
+              /bin/bash /tmp/05-build-system.sh
+
+      - name: Archive system build part 1
+        run: |
+          # Unmount virtual filesystems
+          sudo umount -R $LFS/dev 2>/dev/null || true
+          sudo umount $LFS/proc 2>/dev/null || true
+          sudo umount $LFS/sys 2>/dev/null || true
+          sudo umount $LFS/run 2>/dev/null || true
+
+          cd $LFS
+          echo "=== LFS directory size ==="
+          sudo du -sh .
+          sudo tar -cf /tmp/lfs-system-p1.tar \
+               --exclude='sources' .
+
+      - name: Upload system part 1 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfs-system-part1
+          path: /tmp/lfs-system-p1.tar
+          retention-days: 7
+          compression-level: 0
+
+  # ===========================================================
+  # Stage 4: System build part 2 (Ch. 8 second half)
+  # ===========================================================
+  build-system-part2:
+    name: "Stage 4: System Build Part 2"
+    runs-on: ubuntu-latest
+    needs: [build-system-part1]
+    if: always() && (needs.build-system-part1.result == 'success' || github.event.inputs.start_stage == '4')
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+               /opt/ghc /opt/hostedtoolcache/CodeQL \
+               /usr/local/share/boost /usr/share/swift \
+               /usr/local/.ghcup 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential rsync parted \
+               grub-pc-bin grub2-common zstd
+
+      - name: Download system part 1 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lfs-system-part1
+          path: /tmp
+
+      - name: Restore system part 1
+        run: |
+          sudo mkdir -pv $LFS
+          cd $LFS
+          sudo tar -xf /tmp/lfs-system-p1.tar
+          rm -f /tmp/lfs-system-p1.tar
+          # Restore sources
+          if [ ! -d "$LFS/sources" ] || [ -z "$(ls -A $LFS/sources 2>/dev/null)" ]; then
+            sudo mkdir -pv $LFS/sources
+            sudo wget --input-file=$GITHUB_WORKSPACE/sources/wget-list \
+                 --continue --directory-prefix=$LFS/sources \
+                 --no-verbose --tries=5 --timeout=30 || true
+            sudo wget --input-file=$GITHUB_WORKSPACE/sources/patches-list \
+                 --continue --directory-prefix=$LFS/sources \
+                 --no-verbose --tries=5 --timeout=30 || true
+          fi
+
+      - name: Build system part 2 (Chapter 8 second half)
+        run: |
+          sudo cp scripts/06-build-system-part2.sh $LFS/tmp/
+          sudo chmod +x $LFS/tmp/06-build-system-part2.sh
+
+          # Mount virtual filesystems
+          sudo mount -v --bind /dev $LFS/dev 2>/dev/null || true
+          sudo mount -vt devpts devpts -o gid=5,mode=0620 $LFS/dev/pts 2>/dev/null || true
+          sudo mount -vt proc proc $LFS/proc 2>/dev/null || true
+          sudo mount -vt sysfs sysfs $LFS/sys 2>/dev/null || true
+          sudo mount -vt tmpfs tmpfs $LFS/run 2>/dev/null || true
+
+          sudo chroot $LFS /usr/bin/env -i \
+              HOME=/root TERM=$TERM \
+              PATH=/usr/bin:/usr/sbin \
+              MAKEFLAGS="-j$(nproc)" \
+              /bin/bash /tmp/06-build-system-part2.sh
+
+      - name: Configure system (Chapter 9)
+        run: |
+          sudo cp scripts/07-configure-system.sh $LFS/tmp/
+          sudo chmod +x $LFS/tmp/07-configure-system.sh
+
+          sudo chroot $LFS /usr/bin/env -i \
+              HOME=/root TERM=$TERM \
+              PATH=/usr/bin:/usr/sbin \
+              /bin/bash /tmp/07-configure-system.sh
+
+      - name: Archive complete system
+        run: |
+          sudo umount -R $LFS/dev 2>/dev/null || true
+          sudo umount $LFS/proc 2>/dev/null || true
+          sudo umount $LFS/sys 2>/dev/null || true
+          sudo umount $LFS/run 2>/dev/null || true
+
+          cd $LFS
+          echo "=== Final LFS directory size ==="
+          sudo du -sh .
+          sudo tar -cf /tmp/lfs-complete.tar \
+               --exclude='sources' .
+
+      - name: Upload complete system artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfs-complete-system
+          path: /tmp/lfs-complete.tar
+          retention-days: 7
+          compression-level: 0
+
+  # ===========================================================
+  # Stage 5: Build kernel + Create bootable disk image
+  # ===========================================================
+  create-image:
+    name: "Stage 5: Kernel + Bootable Image"
+    runs-on: ubuntu-latest
+    needs: [build-system-part2]
+    if: always() && (needs.build-system-part2.result == 'success' || github.event.inputs.start_stage == '5')
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+               /opt/ghc /opt/hostedtoolcache/CodeQL \
+               /usr/local/share/boost /usr/share/swift \
+               /usr/local/.ghcup 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential rsync parted \
+               grub-pc-bin grub2-common zstd e2fsprogs
+
+      - name: Download complete system artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lfs-complete-system
+          path: /tmp
+
+      - name: Restore complete system
+        run: |
+          sudo mkdir -pv $LFS
+          cd $LFS
+          sudo tar -xf /tmp/lfs-complete.tar
+          rm -f /tmp/lfs-complete.tar
+          # Need sources for kernel build
+          sudo mkdir -pv $LFS/sources
+          sudo wget --input-file=$GITHUB_WORKSPACE/sources/wget-list \
+               --continue --directory-prefix=$LFS/sources \
+               --no-verbose --tries=5 --timeout=30 || true
+
+      - name: Build kernel and create image
+        run: |
+          chmod +x scripts/*.sh
+          sudo -E bash scripts/08-create-image.sh
+
+      - name: Upload bootable image
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfs-12.2-bootable-image
+          path: /tmp/lfs-12.2.img.zst
+          retention-days: 30
+          compression-level: 0
+
+      - name: Build summary
+        run: |
+          echo "## Linux From Scratch 12.2 Build Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- **lfs-12.2-bootable-image**: Compressed bootable disk image (zstd)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Usage" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Decompress the image" >> $GITHUB_STEP_SUMMARY
+          echo "zstd -d lfs-12.2.img.zst" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Boot with QEMU" >> $GITHUB_STEP_SUMMARY
+          echo "qemu-system-x86_64 -drive file=lfs-12.2.img,format=raw -m 2G -nographic -serial mon:stdio" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ -f /tmp/lfs-12.2.img.zst ]; then
+            SIZE=$(ls -lh /tmp/lfs-12.2.img.zst | awk '{print $5}')
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Image size: $SIZE" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -38,12 +38,24 @@ jobs:
 
       - name: Download source packages
         run: |
+          # First pass
+          sudo wget --input-file=sources/wget-list \
+               --continue \
+               --directory-prefix=$LFS/sources \
+               --no-verbose \
+               --tries=3 \
+               --timeout=60 \
+               --waitretry=5 \
+               --content-disposition || true
+          # Second pass for any failures
           sudo wget --input-file=sources/wget-list \
                --continue \
                --directory-prefix=$LFS/sources \
                --no-verbose \
                --tries=5 \
-               --timeout=30 || true
+               --timeout=120 \
+               --waitretry=10 \
+               --content-disposition || true
           echo "Downloaded $(ls $LFS/sources | wc -l) files"
 
       - name: Download patches
@@ -53,14 +65,53 @@ jobs:
                --directory-prefix=$LFS/sources \
                --no-verbose \
                --tries=5 \
-               --timeout=30 || true
+               --timeout=60 || true
 
-      - name: Verify downloads
+      - name: Fix sourceforge content-disposition filenames
+        run: |
+          # SourceForge /download URLs save as "download", rename them
+          cd $LFS/sources
+          for f in download download.*; do
+            [ -f "$f" ] || continue
+            echo "Removing bogus file: $f"
+            sudo rm -f "$f"
+          done
+          # Re-download sourceforge files with correct names if missing
+          for pkg in expect5.45.4.tar.gz procps-ng-4.0.4.tar.xz psmisc-23.7.tar.xz; do
+            if [ ! -f "$LFS/sources/$pkg" ]; then
+              echo "Re-downloading $pkg..."
+              case $pkg in
+                expect*) sudo wget -O "$LFS/sources/$pkg" "https://sourceforge.net/projects/expect/files/Expect/5.45.4/expect5.45.4.tar.gz/download" --timeout=120 || true ;;
+                procps*) sudo wget -O "$LFS/sources/$pkg" "https://sourceforge.net/projects/procps-ng/files/Production/procps-ng-4.0.4.tar.xz/download" --timeout=120 || true ;;
+                psmisc*) sudo wget -O "$LFS/sources/$pkg" "https://sourceforge.net/projects/psmisc/files/psmisc/psmisc-23.7.tar.xz/download" --timeout=120 || true ;;
+              esac
+            fi
+          done
+
+      - name: Verify critical downloads
         run: |
           echo "=== Downloaded files ==="
-          ls -la $LFS/sources/ | head -20
-          echo "..."
-          echo "Total: $(ls $LFS/sources | wc -l) files"
+          ls $LFS/sources/ | wc -l
+          echo ""
+          CRITICAL="binutils-2.43.1.tar.xz gcc-14.2.0.tar.xz glibc-2.40.tar.xz
+                    linux-6.10.5.tar.xz gmp-6.3.0.tar.xz mpfr-4.2.1.tar.xz
+                    mpc-1.3.1.tar.gz ncurses-6.5.tar.gz bash-5.2.32.tar.gz
+                    coreutils-9.5.tar.xz Python-3.12.5.tar.xz"
+          MISSING=0
+          for f in $CRITICAL; do
+            if [ ! -f "$LFS/sources/$f" ]; then
+              echo "MISSING: $f"
+              MISSING=$((MISSING + 1))
+            else
+              SIZE=$(stat -c%s "$LFS/sources/$f")
+              echo "OK: $f ($SIZE bytes)"
+            fi
+          done
+          if [ $MISSING -gt 0 ]; then
+            echo "ERROR: $MISSING critical files missing!"
+            ls -la $LFS/sources/
+            exit 1
+          fi
 
       - name: Archive sources
         run: |

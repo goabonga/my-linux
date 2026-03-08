@@ -32,6 +32,7 @@ fi
 
 # 7.4 Entering the Chroot Environment
 # We create a script that will be executed inside chroot
+mkdir -pv "$LFS/tmp"
 cat > "$LFS/tmp/build-chroot-tools.sh" << 'CHROOT_SCRIPT'
 #!/bin/bash
 set -euo pipefail
